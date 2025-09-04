@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Leaflet Editor with Attributes and GeoJSON Export</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { width: 100%; height: 100%; }
+    .leaflet-bar a.square-icon {
+      background-image: url('data:image/svg+xml;utf8,<svg fill="%23000" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="20" height="20" stroke="black" fill="none"/></svg>');
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+    #export-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 999;
+      background: white;
+      padding: 6px 12px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+      font-family: sans-serif;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+<button id="export-btn">Export GeoJSON</button>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+<script>
+  const map = L.map('map').setView([0, 0], 2);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+
+  // Custom Square tool
+  L.Draw.Square = L.Draw.Rectangle.extend({
+    statics: { TYPE: 'square' },
+    _drawShape: function (latlng) {
+      const start = this._startLatLng;
+      const dx = latlng.lng - start.lng;
+      const dy = latlng.lat - start.lat;
+      const size = Math.max(Math.abs(dx), Math.abs(dy));
+      const bounds = new L.LatLngBounds(start, [
+        start.lat + Math.sign(dy) * size,
+        start.lng + Math.sign(dx) * size
+      ]);
+      if (!this._shape) {
+        this._shape = new L.Rectangle(bounds, this.options.shapeOptions);
+        this._map.addLayer(this._shape);
+      } else {
+        this._shape.setBounds(bounds);
+      }
+    }
+  });
+
+  const drawControl = new L.Control.Draw({
+    edit: {
+      featureGroup: drawnItems,
+      remove: true
+    },
+    draw: {
+      polygon: true,
+      polyline: true,
+      rectangle: true,
+      circle: true,
+      marker: true,
+      circlemarker: false
+    }
+  });
+
+  map.addControl(drawControl);
+
+  const drawTools = {
+    marker: new L.Draw.Marker(map),
+    polyline: new L.Draw.Polyline(map),
+    polygon: new L.Draw.Polygon(map),
+    rectangle: new L.Draw.Rectangle(map),
+    square: new L.Draw.Square(map),
+    circle: new L.Draw.Circle(map)
+  };
+
+  let activeTool = null;
+
+  function activateTool(toolName) {
+    if (activeTool) activeTool.disable();
+    if (toolName && drawTools[toolName]) {
+      activeTool = drawTools[toolName];
+      activeTool.enable();
+      console.log(`Activated tool: ${toolName}`);
+    }
+  }
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    switch (e.key.toLowerCase()) {
+      case 'm': activateTool('marker'); break;
+      case 'l': activateTool('polyline'); break;
+      case 'p': activateTool('polygon'); break;
+      case 'r': activateTool('rectangle'); break;
+      case 's': activateTool('square'); break;
+      case 'c': activateTool('circle'); break;
+      case 'escape':
+        if (activeTool) {
+          activeTool.disable();
+          activeTool = null;
+        }
+        break;
+    }
+  });
+
+  // Prompt for attributes
+  function promptAttributes() {
+    const name = prompt("Enter feature name:");
+    const type = prompt("Enter feature type (e.g. building, road):");
+    return { name, type };
+  }
+
+  // Handle new feature
+  map.on(L.Draw.Event.CREATED, function (e) {
+    const layer = e.layer;
+    const props = promptAttributes();
+    layer.feature = {
+      type: "Feature",
+      properties: props,
+      geometry: {} // will be auto-generated
+    };
+    drawnItems.addLayer(layer);
+
+    if (activeTool) {
+      activeTool.disable();
+      activeTool = null;
+    }
+  });
+
+  // Export to GeoJSON
+  document.getElementById("export-btn").addEventListener("click", function () {
+    const geojson = drawnItems.toGeoJSON();
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(geojson, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "features.geojson");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  });
+</script>
+
+</body>
+</html>

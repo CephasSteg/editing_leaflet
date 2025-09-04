@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Leaflet Editor with Attributes, Copy/Move, and Background Selector</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { width: 100%; height: 100%; }
+    .leaflet-bar a.square-icon {
+      background-image: url('data:image/svg+xml;utf8,<svg fill="%23000" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="20" height="20" stroke="black" fill="none"/></svg>');
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+    #export-btn, #copy-btn, #move-btn, #bg-btn {
+      position: absolute;
+      top: 10px;
+      z-index: 999;
+      background: white;
+      padding: 6px 12px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+      font-family: sans-serif;
+      user-select: none;
+    }
+    #export-btn { right: 10px; }
+    #copy-btn { right: 120px; display: none; }
+    #move-btn { right: 220px; display: none; }
+    #bg-btn { left: 10px; }
+
+    #bg-selector {
+      position: absolute;
+      top: 40px;
+      left: 10px;
+      z-index: 1000;
+      background: white;
+      border: 1px solid #ccc;
+      padding: 10px;
+      display: none;
+      font-family: sans-serif;
+      max-width: 300px;
+    }
+    #bg-selector label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: bold;
+    }
+    #bg-selector input[type=text] {
+      width: 100%;
+      margin-bottom: 6px;
+      padding: 4px;
+      box-sizing: border-box;
+    }
+    #bg-selector button {
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    /* Selected shape style */
+    .selected {
+      outline: 3px solid red;
+      /* Leaflet layers don't support outline, so we add a red dash pattern */
+      stroke: red !important;
+      weight: 4 !important;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+<button id="export-btn">Export GeoJSON</button>
+<button id="copy-btn">Copy Selected</button>
+<button id="move-btn">Move Selected</button>
+<button id="bg-btn">Background</button>
+
+<div id="bg-selector">
+  <label for="preset-select">Choose Background:</label>
+  <select id="preset-select">
+    <option value="osm">OpenStreetMap</option>
+    <option value="satellite">Satellite (Esri)</option>
+    <option value="topo">Topo Map (OpenTopoMap)</option>
+  </select>
+  <label for="custom-tms">Or enter custom TMS URL:</label>
+  <input type="text" id="custom-tms" placeholder="e.g. https://server/{z}/{x}/{y}.png" />
+  <button id="set-bg-btn">Set Background</button>
+  <button id="close-bg-btn" style="margin-left:8px;">Close</button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+<script>
+  const map = L.map('map').setView([0, 0], 2);
+
+  // Background layers
+  const backgrounds = {
+    osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }),
+    satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri'
+    }),
+    topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data: &copy; OpenTopoMap contributors'
+    })
+  };
+
+  // Start with OSM
+  let currentBackground = backgrounds.osm.addTo(map);
+
+  // FeatureGroup for drawn items
+  const drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+
+  // Custom Square tool
+  L.Draw.Square = L.Draw.Rectangle.extend({
+    statics: { TYPE: 'square' },
+    _drawShape: function (latlng) {
+      const start = this._startLatLng;
+      const dx = latlng.lng - start.lng;
+      const dy = latlng.lat - start.lat;
+      const size = Math.max(Math.abs(dx), Math.abs(dy));
+      const bounds = new L.LatLngBounds(start, [
+        start.lat + Math.sign(dy) * size,
+        start.lng + Math.sign(dx) * size
+      ]);
+      if (!this._shape) {
+        this._shape = new L.Rectangle(bounds, this.options.shapeOptions);
+        this._map.addLayer(this._shape);
+      } else {
+        this._shape.setBounds(bounds);
+      }
+    }
+  });
+
+  // Draw Control
+  const drawControl = new L.Control.Draw({
+    edit: {
+      featureGroup: drawnItems,
+      remove: true
+    },
+    draw: {
+      polygon: true,
+      polyline: true,
+      rectangle: true,
+      circle: true,
+      marker: true,
+      circlemarker: false
+    }
+  });
+
+  map.addControl(drawControl);
+
+  // Custom draw tools for keyboard shortcut usage
+  const drawTools = {
+    marker: new L.Draw.Marker(map),
+    polyline: new L.Draw.Polyline(map),
+    polygon: new L.Draw.Polygon(map),
+    rectangle: new L.Draw.Rectangle(map),
+    square: new L.Draw.Square(map),
+    circle: new L.Draw.Circle(map)
+  };
+
+  let activeTool = null;
+
+  function activateTool(toolName) {
+    if (activeTool) activeTool.disable();
+    if (toolName && drawTools[toolName]) {
+      activeTool = drawTools[toolName];
+      activeTool.enable();
+      console.log(`Activated tool: ${toolName}`);
+    }
+  }
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    switch (e.key.toLowerCase()) {
+      case 'm': activateTool('marker'); break;
+      case 'l': activateTool('polyline'); break;
+      case 'p': activateTool('polygon'); break;
+      case 'r': activateTool('rectangle'); break;
+      case 's': activateTool('square'); break;
+      case 'c': activateTool('circle'); break;
+      case 'escape':
+        if (activeTool) {
+          activeTool.disable();
+          activeTool = null;
+        }
+        break;
+    }
+  });
+
+  // Prompt for attributes
+  function promptAttributes() {
+    const name = prompt("Enter feature name:");
+    const type = prompt("Enter feature type (e.g. building, road):");
+    return { name, type };
+  }
+
+  // Handle new feature
+  map.on(L.Draw.Event.CREATED, function (e) {
+    const layer = e.layer;
+    const props = promptAttributes();
+    layer.feature = {
+      type: "Feature",
+      properties: props,
+      geometry: {}
+    };
+    drawnItems.addLayer(layer);
+
+    if (activeTool) {
+      activeTool.disable();
+      activeTool = null;
+    }
+  });
+
+  // Export to GeoJSON
+  document.getElementById("export-btn").addEventListener("click", function () {
+    const geojson = drawnItems.toGeoJSON();
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(geojson, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "features.geojson");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  });
+
+  /* -------------- New feature: Select & Multi-select shapes -------------- */
+  let selectedLayers = new Set();
+
+  function setLayerSelected(layer, selected) {
+    if (selected) {
+      selectedLayers.add(layer);
+      if (layer.setStyle) {
+        layer.setStyle({ color: 'red', weight: 4 });
+      } else if (layer._icon) {
+        // Marker: add red border
+        layer._icon.style.outline = '3px solid red';
+      }
+    } else {
+      selectedLayers.delete(layer);
+      if (layer.setStyle) {
+        // Reset style - use default
+        layer.setStyle({ color: '#3388ff', weight: 3 });
+      } else if (layer._icon) {
+        if (layer._icon.style) layer._icon.style.outline = '';
+      }
+    }
+  }
+
+  function clearAllSelection() {
+    selectedLayers.forEach(layer => setLayerSelected(layer, false));
+    selectedLayers.clear();
+    updateButtonsVisibility();
+  }
+
+  function updateButtonsVisibility() {
+    const copyBtn = document.getElementById('copy-btn');
+    const moveBtn = document.getElementById('move-btn');
+    if (selectedLayers.size > 0) {
+      copyBtn.style.display = 'inline-block';
+      moveBtn.style.display = 'inline-block';
+    } else {
+      copyBtn.style.display = 'none';
+      moveBtn.style.display = 'none';
+    }
+  }
+
+  // Select/deselect on layer click
+  drawnItems.on('layeradd', function(e) {
+    const layer = e.layer;
+    layer.on('click', function(ev) {
+      // Prevent map click event propagation
+      L.DomEvent.stopPropagation(ev);
+
+      if (ev.originalEvent.shiftKey) {
+        // Multi-select toggle
+        if (selectedLayers.has(layer)) {
+          setLayerSelected(layer, false);
+        } else {
+          setLayerSelected(layer, true);
+        }
+      } else {
+        // Single select - clear others
+        clearAllSelection();
+        setLayerSelected(layer, true);
+      }
+      updateButtonsVisibility();
+    });
+  });
+
+  // Clicking on map clears selection
+  map.on('click', function() {
+    clearAllSelection();
+  });
+
+  /* ----------- Copy Selected Shapes ------------- */
+  document.getElementById('copy-btn').addEventListener('click', function () {
+    if (selectedLayers.size === 0) return;
+
+    const offsetLat = 0.01; // small offset
+    const offsetLng = 0.01;
+
+    const newLayers = [];
+
+    selectedLayers.forEach(layer => {
+      let newLayer;
+
+      if (layer instanceof L.Marker) {
+        const latlng = layer.getLatLng();
+        newLayer = new L.Marker([latlng.lat + offsetLat, latlng.lng + offsetLng]);
+      } else if (layer instanceof L.Polygon) {
+        const latlngs = layer.getLatLngs();
+        const newLatlngs = offsetLatLngs(latlngs, offsetLat, offsetLng);
+        newLayer = new L.Polygon(newLatlngs, layer.options);
+      } else if (layer instanceof L.Polyline) {
+        const latlngs = layer.getLatLngs();
+        const newLatlngs = offsetLatLngs(latlngs, offsetLat, offsetLng);
+        newLayer = new L.Polyline(newLatlngs, layer.options);
+      } else if (layer instanceof L.Rectangle) {
+        const bounds = layer.getBounds();
+        const newBounds = new L.LatLngBounds(
+          [bounds.getSouth() + offsetLat, bounds.getWest() + offsetLng],
+          [bounds.getNorth() + offsetLat, bounds.getEast() + offsetLng]
+        );
+        newLayer = new L.Rectangle(newBounds, layer.options);
+      } else if (layer instanceof L.Circle) {
+        const center = layer.getLatLng();
+        const radius = layer.getRadius();
+        newLayer = new L.Circle([center.lat + offsetLat, center.lng + offsetLng], { radius: radius, ...layer.options });
+      } else {
+        console.warn('Unknown layer type for copy:', layer);
+        return;
+      }
+
+      // Copy feature properties if exist
+      if (layer.feature && layer.feature.properties) {
+        newLayer.feature = {
+          type: "Feature",
+          properties: Object.assign({}, layer.feature.properties)
+        };
+      } else {
+        newLayer.feature = {
+          type: "Feature",
+          properties: {}
+        };
+      }
+
+      drawnItems.addLayer(newLayer);
+      newLayers.push(newLayer);
+    });
+
+    clearAllSelection();
+    newLayers.forEach(l => setLayerSelected(l, true));
+    updateButtonsVisibility();
+  });
+
+  // Helper to offset LatLngs (handles nested arrays for polygons)
+  function offsetLatLngs(latlngs, dLat, dLng) {
+    return latlngs.map(item => {
+      if (Array.isArray(item)) {
+        return offsetLatLngs(item, dLat, dLng);
+      } else {
+        return L.latLng(item.lat + dLat, item.lng + dLng);
+      }
+    });
+  }
+
+  /* ----------- Move Selected Shapes ------------- */
+  let isMoving = false;
+  let moveStartPoint = null;
+
+  document.getElementById('move-btn').addEventListener('click', function () {
+    if (selectedLayers.size === 0) return;
+
+    alert('Click and drag on the map to move selected shapes. Release mouse button to finish.');
+
+    isMoving = true;
+    moveStartPoint = null;
+    map.getContainer().style.cursor = 'move';
+  });
+
+  map.on('mousedown', function (e) {
+    if (!isMoving) return;
+    moveStartPoint = e.latlng;
+  });
+
+  map.on('mousemove', function (e) {
+    if (!isMoving || !moveStartPoint) return;
+
+    const deltaLat = e.latlng.lat - moveStartPoint.lat;
+    const deltaLng = e.latlng.lng - moveStartPoint.lng;
+
+    selectedLayers.forEach(layer => {
+      if (layer instanceof L.Marker) {
+        const pos = layer.getLatLng();
+        layer.setLatLng([pos.lat + deltaLat, pos.lng + deltaLng]);
+      } else if (layer instanceof L.Polygon) {
+        const latlngs = layer.getLatLngs();
+        const newLatlngs = offsetLatLngs(latlngs, deltaLat, deltaLng);
+        layer.setLatLngs(newLatlngs);
+      } else if (layer instanceof L.Polyline) {
+        const latlngs = layer.getLatLngs();
+        const newLatlngs = offsetLatLngs(latlngs, deltaLat, deltaLng);
+        layer.setLatLngs(newLatlngs);
+      } else if (layer instanceof L.Rectangle) {
+        const bounds = layer.getBounds();
+        const newBounds = new L.LatLngBounds(
+          [bounds.getSouth() + deltaLat, bounds.getWest() + deltaLng],
+          [bounds.getNorth() + deltaLat, bounds.getEast() + deltaLng]
+        );
+        layer.setBounds(newBounds);
+      } else if (layer instanceof L.Circle) {
+        const center = layer.getLatLng();
+        layer.setLatLng([center.lat + deltaLat, center.lng + deltaLng]);
+      }
+    });
+
+    moveStartPoint = e.latlng;
+  });
+
+  map.on('mouseup', function (e) {
+    if (isMoving) {
+      isMoving = false;
+      moveStartPoint = null;
+      map.getContainer().style.cursor = '';
+
+      // Update GeoJSON feature coordinates after move
+      selectedLayers.forEach(layer => {
+        if (!layer.feature) layer.feature = { type: "Feature", properties: {} };
+        layer.feature.geometry = layer.toGeoJSON().geometry;
+      });
+    }
+  });
+
+  /* ---------------- Background Selector ------------------ */
+  const bgBtn = document.getElementById('bg-btn');
+  const bgSelector = document.getElementById('bg-selector');
+  const presetSelect = document.getElementById('preset-select');
+  const customTmsInput = document.getElementById('custom-tms');
+  const setBgBtn = document.getElementById('set-bg-btn');
+  const closeBgBtn = document.getElementById('close-bg-btn');
+
+  bgBtn.addEventListener('click', () => {
+    bgSelector.style.display = 'block';
+    // Reset inputs to current background
+    if (currentBackground === backgrounds.osm) presetSelect.value = 'osm';
+    else if (currentBackground === backgrounds.satellite) presetSelect.value = 'satellite';
+    else if (currentBackground === backgrounds.topo) presetSelect.value = 'topo';
+    else presetSelect.value = '';
+    customTmsInput.value = '';
+  });
+
+  closeBgBtn.addEventListener('click', () => {
+    bgSelector.style.display = 'none';
+  });
+
+  setBgBtn.addEventListener('click', () => {
+    let layer;
+    if (customTmsInput.value.trim()) {
+      try {
+        layer = L.tileLayer(customTmsInput.value.trim(), {
+          attribution: 'Custom TMS Layer'
+        });
+      } catch (err) {
+        alert('Invalid TMS URL.');
+        return;
+      }
+    } else {
+      const preset = presetSelect.value;
+      layer = backgrounds[preset] || backgrounds.osm;
+    }
+
+    if (currentBackground) map.removeLayer(currentBackground);
+    currentBackground = layer;
+    currentBackground.addTo(map);
+    bgSelector.style.display = 'none';
+  });
+</script>
+
+</body>
+</html>
